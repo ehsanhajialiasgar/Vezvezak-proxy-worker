@@ -1,0 +1,29 @@
+# Vezvezak key-injecting proxy Worker (vezvezakproxy).
+# The NAME must stay exactly "vezvezakproxy" so `wrangler deploy` updates the
+# EXISTING worker at vezvezakproxy.<subdomain>.workers.dev, not a new one — the
+# app's PROXY_BASE in src/config/api.ts points at that exact host.
+#
+# Secrets already live on the deployed worker (set once via
+#   npx wrangler secret put SERP_API_KEY
+#   npx wrangler secret put GOOGLE_API_KEY
+# ) and are PRESERVED across deploys — a redeploy never clears them.
+name = "vezvezakproxy"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# One entrance only: no public Preview URL copy of the proxy (a second door to the
+# same secrets and billing, outside the path allowlist).
+preview_urls = false
+
+# Cloudflare request logging is OFF, deliberately (Ehsan 2026-08-08). With it on,
+# Cloudflare retains the FULL request URL of every call — which carries the user's
+# raw search text and their coordinates — tied to their IP. That contradicts the
+# product's position (Patent §8: raw queries do not leave the device) and creates a
+# third-party store of exactly the data we promise not to keep.
+#
+# We lose nothing: cache behaviour is observable via the x-vz-cache header. If a
+# real debugging need arises, enable this TEMPORARILY and turn it off again.
+#
+# Data we never hold cannot be breached, subpoenaed, or leaked.
+[observability]
+enabled = false
