@@ -1,0 +1,32 @@
+# vezvezakproxy CI (Ehsan 2026-08-11). Private repo, no auto-deploy. The proxy holds
+# the Google/SerpApi keys as Cloudflare secrets (never in the repo), so the secret
+# scan matters most here. No node tests (the proxy has none). The live deployed-state
+# check lives in the VezvezakNew repo (covers both workers).
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: no secret file / hardcoded secret staged in the tree
+        run: |
+          if git ls-files | grep -iqE "(^|/)\.env($|\.)|\.dev\.vars|\.pem$|\.key$|\.p12$"; then
+            echo "✗ a secret-like file is tracked"; exit 1; fi
+          if git grep -InE "(API_KEY|SECRET|_TOKEN|password|Bearer )[[:space:]]*[:=][[:space:]]*['\"][A-Za-z0-9_-]{20,}" -- . \
+             | grep -viE "env\.|secret put|process\.env|// |example|placeholder" | grep -q .; then
+            echo "✗ a hardcoded secret value is committed"; exit 1; fi
+          echo "✓ no secret in the tree"
+      - name: observability must stay off in wrangler.toml
+        run: |
+          if grep -Eq "\[observability\][^[]*enabled[[:space:]]*=[[:space:]]*true" wrangler.toml; then
+            echo "✗ [observability] enabled = true — request logging would turn on"; exit 1; fi
+          echo "✓ observability declared off"
+      - name: wrangler dry-run (validate bundle, NO deploy)
+        run: npx --yes wrangler deploy --dry-run --outdir /tmp/wrangler-out
