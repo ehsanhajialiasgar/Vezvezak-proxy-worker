@@ -52,6 +52,49 @@ function roundLatLng(v) {
   return `${r(parts[0])},${r(parts[1])}`;
 }
 
+// ── Server-authoritative CAP enforcement (Option B; Ehsan 2026-08-13) ─────────
+// This proxy is where the money is spent (Google Places / SerpApi). Backend
+// counting is authoritative ONLY if this proxy refuses to spend without a
+// successful cap consume. So before a BILLABLE search we forward the caller's own
+// JWT to vezvezak-api /search/consume and spend ONLY on a 200. The proxy stays
+// thin: it holds no JWT_SECRET and no D1 (that blast radius was deliberately kept
+// out — see the SSRF work). It just asks "may I spend?" and obeys the answer.
+//
+// ROLLOUT: gated behind ENFORCE_CAPS. OFF by default so today's clients (which do
+// NOT yet send an Authorization header) keep working unchanged. It is flipped ON
+// only once the Part 2 client ships — it consumes per search and forwards its JWT
+// (+ a per-search vz_sid so the bundle's sub-calls dedupe to one slot). Until then
+// the flag stays off; this is a deliberate cutover, never a silent fail-open.
+const API_BASE_DEFAULT = 'https://vezvezak-api.gfmnhs8y8r.workers.dev';
+
+// The Google sub-paths that ARE a billable primary search (metered as 'local').
+// details / photo / geocode are cheap follow-ups to an already-consumed search
+// and pass through un-metered.
+const METERED_GOOGLE_PATHS = new Set(['place/textsearch/json', 'place/nearbysearch/json']);
+
+// Ask the backend to consume one cap slot for this caller. Returns the backend's
+// Response when it refused (so we can relay the exact refusal), or null on allow.
+// FAILS CLOSED: no Authorization, a non-200, or an unreachable backend all refuse
+// — never fall through to a billable upstream call.
+async function consumeOrRefuse(request, env, kind, searchId) {
+  const auth = request.headers.get('Authorization');
+  if (!auth) return json(401, { error: 'auth_required', reason: 'sign_in' });
+  const apiBase = env.API_BASE || API_BASE_DEFAULT;
+  try {
+    const res = await fetch(`${apiBase}/search/consume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: auth },
+      body: JSON.stringify({ kind, searchId: searchId || undefined }),
+    });
+    if (res.status === 200) return null;                 // allowed → spend
+    const body = await res.text();                       // relay the refusal verbatim
+    return new Response(body, { status: res.status, headers: { 'Content-Type': 'application/json', ...CORS } });
+  } catch {
+    return json(503, { error: 'cap_check_unavailable' }); // fail closed
+  }
+}
+const enforcing = (env) => env.ENFORCE_CAPS === '1' || env.ENFORCE_CAPS === true || env.ENFORCE_CAPS === 'true';
+
 export default {
   async fetch(request, env) {
     // Only GET and OPTIONS (CORS preflight) are allowed. Any other method — incl.
@@ -74,9 +117,16 @@ export default {
         // turned into a general-purpose paid-API relay.
         if (!ALLOWED_SERP_ENGINES.has(engine)) return json(400, { error: 'engine_not_allowed' });
 
+        // Every /serp/search is a billable ONLINE search — consume a cap slot first.
+        if (enforcing(env)) {
+          const refusal = await consumeOrRefuse(request, env, 'online', searchParams.get('vz_sid'));
+          if (refusal) return refusal;               // over cap / not signed in → no upstream call
+        }
+
         const upstream = new URL('https://serpapi.com/search.json');
         for (const [k, v] of searchParams) {
           if (k === 'api_key') continue;           // never accept a key from the client
+          if (k === 'vz_sid') continue;            // internal cap-dedupe id — never sent upstream
           upstream.searchParams.set(k, v);
         }
         upstream.searchParams.set('api_key', env.SERP_API_KEY);   // injected here
@@ -101,6 +151,20 @@ export default {
           return json(400, { error: 'path_not_allowed' });
         }
 
+        // A primary LOCAL search (text/nearby) consumes a cap slot; details/geocode
+        // pass through un-metered. Photos consume no slot but are bounded per search
+        // (kind 'photo') so a bundle can't pull unlimited paid photos. text+nearby
+        // share one vz_sid and dedupe to a single 'local' slot server-side.
+        if (enforcing(env)) {
+          if (METERED_GOOGLE_PATHS.has(path)) {
+            const refusal = await consumeOrRefuse(request, env, 'local', searchParams.get('vz_sid'));
+            if (refusal) return refusal;
+          } else if (path === 'place/photo' || path.startsWith('place/photo')) {
+            const refusal = await consumeOrRefuse(request, env, 'photo', searchParams.get('vz_sid'));
+            if (refusal) return refusal;
+          }
+        }
+
         // We proxy Places ONLY to keep the API key server-side. There is NO shared
         // edge cache (Ehsan 2026-08-13): serving one user's Places content to another
         // is redistribution, which Google's terms forbid — caching is permitted to
@@ -113,6 +177,7 @@ export default {
         const params = new URLSearchParams();
         for (const [k, v] of searchParams) {
           if (k === 'key') continue;               // never accept a key from the client
+          if (k === 'vz_sid') continue;            // internal cap-dedupe id — never sent upstream
           params.set(k, k === 'location' ? roundLatLng(v) : v);
         }
         params.set('key', env.GOOGLE_API_KEY);     // injected here (constant → doesn't fragment the key)

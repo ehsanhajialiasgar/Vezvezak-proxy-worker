@@ -27,3 +27,14 @@ preview_urls = false
 # Data we never hold cannot be breached, subpoenaed, or leaked.
 [observability]
 enabled = false
+
+# Server-authoritative cap enforcement (Option B; Ehsan 2026-08-13).
+#   API_BASE     — vezvezak-api origin the proxy asks "may I spend?" (/search/consume).
+#   ENFORCE_CAPS — "0" (OFF) until the Part 2 client ships (it must send an
+#                  Authorization header + a per-search vz_sid). Flipping this to "1"
+#                  is the deliberate cutover: from then, a billable Google Places /
+#                  SerpApi call happens ONLY after a successful cap consume. Turn it
+#                  on simultaneously with the client release, never before.
+[vars]
+API_BASE = "https://vezvezak-api.gfmnhs8y8r.workers.dev"
+ENFORCE_CAPS = "0"
