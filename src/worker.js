@@ -101,11 +101,15 @@ export default {
           return json(400, { error: 'path_not_allowed' });
         }
 
-        // Places data (a store's name/location) is identical for every user, so
-        // it must be cached server-side — it was NOT before, which made Places
-        // ~89% of per-search cost. Round coordinates to ~3dp (~110m) so two users
-        // on the same street share ONE cache entry, and sort params so the cache
-        // key can't fragment on order.
+        // We proxy Places ONLY to keep the API key server-side. There is NO shared
+        // edge cache (Ehsan 2026-08-13): serving one user's Places content to another
+        // is redistribution, which Google's terms forbid — caching is permitted to
+        // compensate for latency, never for cost. The client key is stripped and the
+        // server key injected here. Coordinates already arrive coarse (~110m, rounded
+        // on the device); the server-side round below is kept purely as defence in
+        // depth, and params are sorted only for a tidy upstream URL.
+        // Cost, MEASURED: one local search = 2 Places calls (Text + Nearby, parallel)
+        // + ≤1 Photo ≈ $0.064–0.071 at Google LIST PRICE (never verified vs an invoice).
         const params = new URLSearchParams();
         for (const [k, v] of searchParams) {
           if (k === 'key') continue;               // never accept a key from the client
@@ -117,17 +121,16 @@ export default {
           upstream.searchParams.set(k, v);
         }
 
-        // TTL by endpoint: search results 24h, photos 7 days. Place photos redirect
-        // to a signed image URL — follow and stream so the key is never exposed.
-        const ttl = path.startsWith('place/photo') ? 604800 : 86400;
-        const res = await fetch(upstream.toString(), {
-          redirect: 'follow',
-          cf: { cacheTtl: ttl, cacheEverything: true },   // shared edge cache — the whole point of this change
-        });
+        // Place photos redirect to a signed image URL — follow and stream so the key
+        // is never exposed. NO cf cache: Places content is never held in a shared
+        // edge cache (that would be redistribution).
+        const res = await fetch(upstream.toString(), { redirect: 'follow' });
         const headers = new Headers(CORS);
         headers.set('Content-Type', res.headers.get('Content-Type') || 'application/json');
-        headers.set('Cache-Control', `public, max-age=${ttl}`);
-        headers.set('x-vz-cache', res.headers.get('cf-cache-status') || 'UNKNOWN'); // observe the shared-cache HIT/MISS
+        // Short PRIVATE client-side cache only — latency compensation, per user, never
+        // a shared/public one. (No x-vz-cache header: it existed only to observe the
+        // shared edge cache, which is gone.)
+        headers.set('Cache-Control', 'private, max-age=60');
         return new Response(res.body, { status: res.status, headers });
       }
 

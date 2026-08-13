@@ -28,5 +28,7 @@ jobs:
           if grep -Eq "\[observability\][^[]*enabled[[:space:]]*=[[:space:]]*true" wrangler.toml; then
             echo "✗ [observability] enabled = true — request logging would turn on"; exit 1; fi
           echo "✓ observability declared off"
+      - name: proxy tests
+        run: for t in test/*.test.mjs; do node "$t"; done
       - name: wrangler dry-run (validate bundle, NO deploy)
         run: npx --yes wrangler deploy --dry-run --outdir /tmp/wrangler-out
