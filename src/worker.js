@@ -21,8 +21,8 @@
  *   /google/maps/api/<path>?...          -> maps.googleapis.com (+ key injected)
  */
 
-const ALLOWED_SERP_ENGINES = new Set(['google_shopping', 'amazon', 'google_local']);
-const ALLOWED_GOOGLE_PATHS = [
+export const ALLOWED_SERP_ENGINES = new Set(['google_shopping', 'amazon', 'google_local']);
+export const ALLOWED_GOOGLE_PATHS = [
   'place/nearbysearch/json',
   'place/textsearch/json',
   'place/details/json',
@@ -67,10 +67,27 @@ function roundLatLng(v) {
 // the flag stays off; this is a deliberate cutover, never a silent fail-open.
 const API_BASE_DEFAULT = 'https://vezvezak-api.gfmnhs8y8r.workers.dev';
 
-// The Google sub-paths that ARE a billable primary search (metered as 'local').
-// details / photo / geocode are cheap follow-ups to an already-consumed search
-// and pass through un-metered.
+// Every allowlisted Google path MUST fall in exactly ONE gate category below, or
+// gate-coverage.test.mjs fails the build. This is the wall: a new allowlisted path
+// that nobody gated cannot ship.
+//   METERED  → a billable PRIMARY search; consumes a 'local' cap slot.
+//   PHOTO    → consumes no slot but is ceiling-checked per search (kind 'photo').
+//   AUTH_ONLY→ a billable FOLLOW-UP (details/geocode): not a slot, but real money, so
+//              it requires a signed-in caller (no anonymous spend). We auth-gate here
+//              rather than invent a consume kind — the backend /search/consume only
+//              accepts local|online|photo and would 400 anything else.
 const METERED_GOOGLE_PATHS = new Set(['place/textsearch/json', 'place/nearbysearch/json']);
+const PHOTO_GOOGLE_PATHS = new Set(['place/photo']);
+const AUTH_ONLY_GOOGLE_PATHS = new Set(['place/details/json', 'geocode/json']);
+// Exported for the build-failing coverage test (ALLOWED ⊆ METERED ∪ PHOTO ∪ AUTH_ONLY).
+export { METERED_GOOGLE_PATHS, PHOTO_GOOGLE_PATHS, AUTH_ONLY_GOOGLE_PATHS };
+
+// Require a signed-in caller WITHOUT consuming a slot — for billable follow-ups
+// (details/geocode). Same fail-closed 401 as consumeOrRefuse's own auth check.
+function requireAuth(request) {
+  if (!request.headers.get('Authorization')) return json(401, { error: 'auth_required', reason: 'sign_in' });
+  return null;
+}
 
 // Ask the backend to consume one cap slot for this caller. Returns the backend's
 // Response when it refused (so we can relay the exact refusal), or null on allow.
@@ -93,7 +110,16 @@ async function consumeOrRefuse(request, env, kind, searchId) {
     return json(503, { error: 'cap_check_unavailable' }); // fail closed
   }
 }
-const enforcing = (env) => env.ENFORCE_CAPS === '1' || env.ENFORCE_CAPS === true || env.ENFORCE_CAPS === 'true';
+// FAIL CLOSED on an unexpected value. ONLY the explicit OFF sentinels skip
+// enforcement — the deliberate pre-cutover state ("0"). ANYTHING else — an unset var,
+// a typo like "2"/"yes", an empty string — ENFORCES (refuses to spend without a
+// consume). A money control must fail closed: an accident switches enforcement ON, not
+// off. (Was: `=== '1' || true || 'true'`, which fell OPEN on any unknown value.)
+const enforcing = (env) => {
+  const v = env.ENFORCE_CAPS;
+  if (v === '0' || v === false || v === 'false' || v === 'off') return false;
+  return true;
+};
 
 export default {
   async fetch(request, env) {
@@ -151,16 +177,22 @@ export default {
           return json(400, { error: 'path_not_allowed' });
         }
 
-        // A primary LOCAL search (text/nearby) consumes a cap slot; details/geocode
-        // pass through un-metered. Photos consume no slot but are bounded per search
-        // (kind 'photo') so a bundle can't pull unlimited paid photos. text+nearby
-        // share one vz_sid and dedupe to a single 'local' slot server-side.
+        // Gate EVERY billable path — no anonymous or un-consumed spend. A primary
+        // LOCAL search (text/nearby) consumes a 'local' slot; text+nearby share one
+        // vz_sid and dedupe to a single slot server-side. Photos consume no slot but
+        // are ceiling-checked per search (kind 'photo'). Follow-ups (details/geocode)
+        // are billable too but not a slot — they require AUTH so nothing bills
+        // anonymously. The final `else` also catches any allowlisted-but-uncategorized
+        // path defensively (the build test guarantees there is none) → require auth.
         if (enforcing(env)) {
           if (METERED_GOOGLE_PATHS.has(path)) {
             const refusal = await consumeOrRefuse(request, env, 'local', searchParams.get('vz_sid'));
             if (refusal) return refusal;
-          } else if (path === 'place/photo' || path.startsWith('place/photo')) {
+          } else if (PHOTO_GOOGLE_PATHS.has(path) || path.startsWith('place/photo')) {
             const refusal = await consumeOrRefuse(request, env, 'photo', searchParams.get('vz_sid'));
+            if (refusal) return refusal;
+          } else {
+            const refusal = requireAuth(request);   // details / geocode — billable follow-up, auth required
             if (refusal) return refusal;
           }
         }

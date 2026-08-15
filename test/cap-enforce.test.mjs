@@ -80,12 +80,47 @@ try {
     assert.equal(res.status, 402);
     assert.equal(hits.upstream, 0, 'a refused photo must not reach the signed image');
   });
-  await t('place/details is a follow-up — NOT metered, passes straight through', async () => {
+  await t('place/details is a follow-up — NOT metered, but AUTH is required (with auth → passes)', async () => {
     const hits = install({ consumeStatus: 402 });   // even if a consume WOULD refuse
     const res = await worker.fetch(req('/google/maps/api/place/details/json?place_id=x'), { ...ENV, ENFORCE_CAPS: '1' });
-    assert.equal(hits.consume, 0, 'details must not consume anything');
-    assert.equal(hits.upstream, 1, 'details passes through');
+    assert.equal(hits.consume, 0, 'details must not consume a slot');
+    assert.equal(hits.upstream, 1, 'details passes through for a signed-in caller');
     assert.equal(res.status, 200);
+  });
+
+  console.log('\nENFORCE_CAPS on — billable follow-ups (details/geocode) require AUTH: no anonymous spend');
+  await t('place/details WITHOUT auth → 401, ZERO upstream (was: unauthenticated billable)', async () => {
+    const hits = install({ consumeStatus: 200 });
+    const res = await worker.fetch(req('/google/maps/api/place/details/json?place_id=x', { auth: false }), { ...ENV, ENFORCE_CAPS: '1' });
+    assert.equal(res.status, 401);
+    assert.equal(hits.upstream, 0, 'anonymous details must not reach Google');
+  });
+  await t('geocode WITH auth → passes, consumes no slot', async () => {
+    const hits = install({ consumeStatus: 402 });
+    const res = await worker.fetch(req('/google/maps/api/geocode/json?address=x'), { ...ENV, ENFORCE_CAPS: '1' });
+    assert.equal(hits.consume, 0, 'geocode must not consume a slot');
+    assert.equal(hits.upstream, 1, 'geocode passes through for a signed-in caller');
+    assert.equal(res.status, 200);
+  });
+  await t('geocode WITHOUT auth → 401, ZERO upstream (was: unauthenticated + unmetered)', async () => {
+    const hits = install({ consumeStatus: 200 });
+    const res = await worker.fetch(req('/google/maps/api/geocode/json?address=x', { auth: false }), { ...ENV, ENFORCE_CAPS: '1' });
+    assert.equal(res.status, 401);
+    assert.equal(hits.upstream, 0, 'anonymous geocode must not reach Google');
+  });
+
+  console.log('\nenforcing() FAILS CLOSED on an unknown/unset flag value');
+  await t('unknown ENFORCE_CAPS value ("yes") → enforces → anonymous serp is 401, ZERO upstream', async () => {
+    const hits = install({ consumeStatus: 200 });
+    const res = await worker.fetch(req('/serp/search?engine=google_shopping&q=x', { auth: false }), { ...ENV, ENFORCE_CAPS: 'yes' });
+    assert.equal(res.status, 401, 'an unexpected flag value must ENFORCE, not fall open');
+    assert.equal(hits.upstream, 0);
+  });
+  await t('UNSET ENFORCE_CAPS → enforces (fail closed) → anonymous local is 401, ZERO upstream', async () => {
+    const hits = install({ consumeStatus: 200 });
+    const res = await worker.fetch(req('/google/maps/api/place/textsearch/json?query=x', { auth: false }), { ...ENV });
+    assert.equal(res.status, 401, 'a missing flag must ENFORCE, not fall open');
+    assert.equal(hits.upstream, 0);
   });
   await t('vz_sid is stripped from the upstream URL (never sent to Google/Serp)', async () => {
     const hits = install({ consumeStatus: 200 });
