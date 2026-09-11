@@ -30,5 +30,7 @@ jobs:
           echo "✓ observability declared off"
       - name: proxy tests
         run: for t in test/*.test.mjs; do node "$t"; done
+      - name: workflow syntax (YAML + the shell inside every run: block)
+        run: ruby scripts/workflow-syntax-gate.rb
       - name: wrangler dry-run (validate bundle, NO deploy)
         run: npx --yes wrangler deploy --dry-run --outdir /tmp/wrangler-out
